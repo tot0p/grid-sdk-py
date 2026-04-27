@@ -208,6 +208,19 @@ class Client:
                 self._in_match = False
                 continue
 
+            # Detect win: bot alive and all opponents dead
+            if self._in_match and len(state.bots) > 1:
+                all_opponents_dead = all(
+                    not bot.alive
+                    for bot in state.bots
+                    if bot.bot_id != state.you.bot_id
+                )
+                if all_opponents_dead:
+                    if isinstance(self._config.strategy, MatchAware):
+                        self._config.strategy.on_win(state)
+                    self._in_match = False
+                    continue
+
             direction = self._config.strategy.move(state)
 
             cmd = json.dumps({"action": "move", "direction": direction.value})

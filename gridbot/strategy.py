@@ -33,6 +33,7 @@ class MatchAware:
             def move(self, state): ...
             def on_match_start(self, state): ...
             def on_death(self, state): ...
+            def on_win(self, state): ...
     """
 
     def on_match_start(self, state: GameState) -> None:
@@ -40,3 +41,6 @@ class MatchAware:
 
     def on_death(self, state: GameState) -> None:
         """Called when the bot dies (you.alive becomes False)."""
+
+    def on_win(self, state: GameState) -> None:
+        """Called when the bot wins (all opponents dead, bot still alive)."""
