@@ -12,6 +12,8 @@ from .types import GameState
 
 logger = logging.getLogger(__name__)
 
+SDK_VERSION = "0.2.0"
+
 
 class Config:
     """Configuration for the bot client."""
@@ -64,6 +66,7 @@ class Client:
         self._in_match = False
         self._last_turn = 0
         self._stop_event = threading.Event()
+        self._version_mismatch = False
         self._ws: Optional[websocket.WebSocketApp] = None
         self._backoff = 5.0
         self._max_backoff = 60.0
@@ -126,7 +129,10 @@ class Client:
 
     def _on_open(self, ws) -> None:
         self._backoff = 5.0  # reset on successful connect
-        self._log("Connected to game server")
+        self._version_mismatch = False
+        # Send version handshake immediately — server expects this as first message.
+        ws.send(json.dumps({"type": "hello", "version": SDK_VERSION}))
+        self._log(f"Connected — sent hello v{SDK_VERSION}")
 
     def _on_close(self, ws, code, msg) -> None:
         self._ws = None
@@ -141,7 +147,21 @@ class Client:
         except json.JSONDecodeError:
             return
 
-        if data.get("type") != "game_state" or not data.get("you"):
+        msg_type = data.get("type")
+
+        if msg_type == "hello":
+            self._log(f"Handshake OK (server v{data.get('version', '?')})")
+            return
+
+        if msg_type == "error":
+            code = data.get("code", "")
+            self._log(f"Server error [{code}]: {data.get('message', 'unknown')}")
+            if code == "version_mismatch":
+                self._version_mismatch = True
+                self.stop()
+            return
+
+        if msg_type != "game_state" or not data.get("you"):
             return
 
         state = GameState.from_dict(data)

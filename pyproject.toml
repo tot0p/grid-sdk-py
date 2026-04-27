@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grid-sdk-py"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python SDK for Grid — Tron-style autonomous bot battles"
 readme = "README.md"
 license = { text = "MIT" }
