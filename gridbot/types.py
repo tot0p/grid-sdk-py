@@ -61,3 +61,18 @@ class Move:
     x: int
     y: int
     head_on_risk: bool
+
+
+@dataclass
+class MatchResult:
+    """Outcome of a completed match, passed to on_match_end."""
+    won: bool        # True if you survived; False if you died
+    score: int       # your final score (trail length)
+    turns: int       # number of turns the match lasted
+    state: GameState # final game state
+
+
+@dataclass
+class Position:
+    x: int
+    y: int

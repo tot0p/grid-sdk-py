@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple
 
 from .direction import ALL_DIRECTIONS, Direction
-from .types import Bot, GameState, Move
+from .types import Bot, GameState, Move, Position
 
 # ---------------------------------------------------------------------------
 # Internal: flat grid cache
@@ -9,19 +9,13 @@ from .types import Bot, GameState, Move
 
 def _flat(state: GameState) -> bytearray:
     """
-    Return a *cached* flat bytearray view of ``state.grid``.
-
-    Layout: ``flat[y * width + x]`` — 0 means free, 1 means occupied.
-
-    The result is stored on the GameState instance so that multiple helpers
-    called for the same state (common in strategies) each convert the 2-D
-    list only once.  On a 100×100 grid this saves ~10 000 operations per
-    strategy call.
+    Return a *cached* flat bytearray view of state.grid.
+    Layout: flat[y * width + x] — 0 = free, 1 = occupied.
+    Cached on the GameState instance so multiple helpers share one conversion.
     """
     cache = state.__dict__.get("_flat_cache")
     if cache is not None:
         return cache
-
     w = state.width
     flat = bytearray(state.height * w)
     for y, row in enumerate(state.grid):
@@ -29,17 +23,16 @@ def _flat(state: GameState) -> bytearray:
         for x, val in enumerate(row):
             if val:
                 flat[base + x] = 1
-
     state.__dict__["_flat_cache"] = flat
     return flat
 
 
 # ---------------------------------------------------------------------------
-# Public helpers
+# Cell inspection
 # ---------------------------------------------------------------------------
 
 def is_safe(x: int, y: int, state: GameState) -> bool:
-    """Return True if (x, y) is within bounds and empty (grid value 0)."""
+    """Return True if (x, y) is within bounds and the cell is empty."""
     return (
         0 <= x < state.width
         and 0 <= y < state.height
@@ -47,11 +40,50 @@ def is_safe(x: int, y: int, state: GameState) -> bool:
     )
 
 
+def grid_value(x: int, y: int, state: GameState) -> int:
+    """Return the raw grid value at (x, y), or -1 if out of bounds.
+    0 = empty; any other value = occupied by a bot's trail."""
+    if x < 0 or x >= state.width or y < 0 or y >= state.height:
+        return -1
+    return state.grid[y][x]
+
+
+def neighbors(x: int, y: int, state: GameState) -> List[Position]:
+    """Return all safe 4-connected positions adjacent to (x, y)."""
+    return [
+        Position(nx, ny)
+        for d in ALL_DIRECTIONS
+        for nx, ny in [d.apply(x, y)]
+        if is_safe(nx, ny, state)
+    ]
+
+
+def wall_count(x: int, y: int, state: GameState) -> int:
+    """Count non-safe adjacent cells (out-of-bounds + occupied) around (x, y).
+    Range: 0–4."""
+    return sum(
+        1 for d in ALL_DIRECTIONS
+        if not is_safe(*d.apply(x, y), state)
+    )
+
+
+def fill_ratio(state: GameState) -> float:
+    """Return the fraction of the grid that is occupied (0.0–1.0).
+    Useful for detecting game phase: <0.15 = early, 0.15–0.5 = mid, >0.5 = late."""
+    total = state.width * state.height
+    if total == 0:
+        return 0.0
+    flat = _flat(state)
+    return sum(flat) / total
+
+
+# ---------------------------------------------------------------------------
+# Move generation
+# ---------------------------------------------------------------------------
+
 def safe_moves(state: GameState) -> List[Direction]:
-    """
-    Return all directions that lead to a safe cell, excluding the reverse
-    direction (180-degree turn).
-    """
+    """Return all directions from the bot's current position that lead to a
+    safe cell, excluding the reverse direction (180-degree turn)."""
     if state.you is None:
         return []
     current = Direction(state.you.direction)
@@ -63,10 +95,8 @@ def safe_moves(state: GameState) -> List[Direction]:
 
 
 def safe_moves_detailed(state: GameState) -> List[Move]:
-    """
-    Return all safe moves with target positions and head-on risk info.
-    Excludes the reverse direction.
-    """
+    """Return all safe moves with target positions and head-on risk info.
+    Excludes the reverse direction."""
     if state.you is None:
         return []
     current = Direction(state.you.direction)
@@ -85,22 +115,15 @@ def safe_moves_detailed(state: GameState) -> List[Move]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Space analysis
+# ---------------------------------------------------------------------------
+
 def flood_fill(x: int, y: int, state: GameState) -> int:
-    """
-    Count reachable empty cells from (x, y).
+    """Count reachable empty cells from (x, y) via BFS.
 
-    Implementation notes
-    --------------------
-    * Uses a flat ``bytearray`` for both the grid and the visited map —
-      raw-byte arrays are substantially faster than Python ``list[bool]``.
-    * Uses integer cell indices instead of ``(x, y)`` tuples to avoid
-      per-cell object allocation and tuple unpacking.
-    * Traverses the frontier with a plain list + integer cursor
-      (``while qi < len(stack)``) — avoids the overhead of
-      ``collections.deque.popleft()``.
-
-    These together give ~5-8× speedup over the naïve tuple-based BFS on a
-    100×100 grid.
+    Optimised with bytearray + integer indices (~5-8× faster than naïve BFS):
+    no per-cell tuple allocation, no deque overhead.
     """
     w, h = state.width, state.height
     flat = _flat(state)
@@ -122,56 +145,42 @@ def flood_fill(x: int, y: int, state: GameState) -> int:
         px = pos % w
         py = pos // w
 
-        # left
         if px > 0:
             n = pos - 1
             if not visited[n] and not flat[n]:
-                visited[n] = 1
-                count += 1
-                stack.append(n)
-        # right
+                visited[n] = 1; count += 1; stack.append(n)
         if px < w - 1:
             n = pos + 1
             if not visited[n] and not flat[n]:
-                visited[n] = 1
-                count += 1
-                stack.append(n)
-        # up
+                visited[n] = 1; count += 1; stack.append(n)
         if py > 0:
             n = pos - w
             if not visited[n] and not flat[n]:
-                visited[n] = 1
-                count += 1
-                stack.append(n)
-        # down
+                visited[n] = 1; count += 1; stack.append(n)
         if py < h - 1:
             n = pos + w
             if not visited[n] and not flat[n]:
-                visited[n] = 1
-                count += 1
-                stack.append(n)
+                visited[n] = 1; count += 1; stack.append(n)
 
     return count
 
 
+def is_trapped(state: GameState, threshold: int = 15) -> bool:
+    """Return True if the bot's reachable space is below threshold.
+    Useful as a quick escape-priority trigger. Default threshold: 15 cells."""
+    if state.you is None:
+        return True
+    return flood_fill(state.you.x, state.you.y, state) < threshold
+
+
 def voronoi_bfs(
-    my_x: int,
-    my_y: int,
-    opp_x: int,
-    opp_y: int,
+    my_x: int, my_y: int,
+    opp_x: int, opp_y: int,
     state: GameState,
 ) -> Tuple[int, int]:
-    """
-    Simultaneous BFS from two positions.
-
-    Returns ``(my_count, opp_count)`` — the number of cells each side
-    reaches first.  Mirrors the Go SDK's VoronoiBFS exactly.
-
-    Optimised with the same integer-index / bytearray approach as
-    ``flood_fill``.  Each BFS layer is stored as a plain Python list;
-    rebuilding the list per layer avoids the overhead of a shared deque
-    shared between both frontiers.
-    """
+    """Simultaneous BFS from two positions.
+    Returns (my_count, opp_count) — cells each side reaches first.
+    Optimised with bytearray + integer indices."""
     w, h = state.width, state.height
     flat = _flat(state)
     size = w * h
@@ -180,7 +189,7 @@ def voronoi_bfs(
     if flat[my_start]:
         return 0, 0
 
-    owner = bytearray(size)   # 0 = unvisited, 1 = mine, 2 = opponent
+    owner = bytearray(size)   # 0=unvisited, 1=mine, 2=opponent
     owner[my_start] = 1
     my_count = 1
     my_front: list = [my_start]
@@ -194,12 +203,9 @@ def voronoi_bfs(
         opp_front = [opp_start]
 
     while my_front or opp_front:
-
-        # ---- expand my frontier one BFS layer ----
         next_my: list = []
         for pos in my_front:
-            px = pos % w
-            py = pos // w
+            px = pos % w; py = pos // w
             if px > 0:
                 n = pos - 1
                 if owner[n] == 0 and not flat[n]:
@@ -218,11 +224,9 @@ def voronoi_bfs(
                     owner[n] = 1; my_count += 1; next_my.append(n)
         my_front = next_my
 
-        # ---- expand opp frontier one BFS layer ----
         next_opp: list = []
         for pos in opp_front:
-            px = pos % w
-            py = pos // w
+            px = pos % w; py = pos // w
             if px > 0:
                 n = pos - 1
                 if owner[n] == 0 and not flat[n]:
@@ -244,20 +248,26 @@ def voronoi_bfs(
     return my_count, opp_count
 
 
+# ---------------------------------------------------------------------------
+# Distance
+# ---------------------------------------------------------------------------
+
 def manhattan_distance(x1: int, y1: int, x2: int, y2: int) -> int:
-    """Return the Manhattan distance between two positions."""
+    """Return |x1-x2| + |y1-y2|."""
     return abs(x1 - x2) + abs(y1 - y2)
 
 
-def wall_count(x: int, y: int, state: GameState) -> int:
-    """Count non-safe adjacent cells (walls + trails) around (x, y)."""
-    count = 0
-    for d in ALL_DIRECTIONS:
-        nx, ny = d.apply(x, y)
-        if not is_safe(nx, ny, state):
-            count += 1
-    return count
+def distance_to(state: GameState, target: Bot) -> int:
+    """Return the Manhattan distance from the bot to a target bot.
+    Returns -1 if state.you is None."""
+    if state.you is None:
+        return -1
+    return manhattan_distance(state.you.x, state.you.y, target.x, target.y)
 
+
+# ---------------------------------------------------------------------------
+# Opponent analysis
+# ---------------------------------------------------------------------------
 
 def head_on_risk(x: int, y: int, state: GameState) -> bool:
     """Return True if an alive opponent could also move to (x, y) next turn."""
@@ -289,7 +299,14 @@ def find_closest_opponent(state: GameState) -> Optional[Bot]:
     opponents = find_opponents(state)
     if not opponents:
         return None
-    return min(
-        opponents,
-        key=lambda b: manhattan_distance(state.you.x, state.you.y, b.x, b.y),
-    )
+    return min(opponents, key=lambda b: manhattan_distance(
+        state.you.x, state.you.y, b.x, b.y
+    ))
+
+
+def bot_by_id(bot_id: int, state: GameState) -> Optional[Bot]:
+    """Return the bot with the given ID, or None if not found."""
+    for b in state.bots:
+        if b.bot_id == bot_id:
+            return b
+    return None

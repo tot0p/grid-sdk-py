@@ -8,11 +8,11 @@ import websocket
 
 from .direction import Direction
 from .strategy import MatchAware, Strategy
-from .types import GameState
+from .types import GameState, MatchResult
 
 logger = logging.getLogger(__name__)
 
-SDK_VERSION = "0.2.0"
+SDK_VERSION = "0.3.0"
 
 
 class Config:
@@ -25,7 +25,6 @@ class Config:
         strategy: Strategy,
         on_log: Optional[Callable[[str], None]] = None,
     ):
-        # e.g. "ws://localhost:8083"
         self.server_url = server_url.rstrip("/")
         self.token = token
         self.strategy = strategy
@@ -39,43 +38,34 @@ class Client:
     Architecture
     ------------
     Two threads:
-    - **WebSocket thread** (``run_forever``): receives frames from the server,
-      immediately responds to PING with PONG (handled by websocket-client),
-      and drops parsed ``game_state`` messages into a one-item queue.
-    - **Strategy thread**: reads the latest game state, computes the move, and
-      sends the command back on the same WebSocket.
+    - **WebSocket thread** (``run_forever``): receives frames, immediately
+      responds to PING with PONG, dispatches lifecycle events (match_start /
+      match_end) inline, and drops game_state messages into a one-item queue.
+    - **Strategy thread**: reads the latest game_state, computes the move,
+      sends the command back.
 
-    Why two threads?
-    The game server sends PING frames every ~27 s and expects PONG within 30 s.
-    If strategy computation ran inside ``on_message``, it would block the
-    WebSocket event loop, preventing PONG from being sent → server disconnects.
-
-    Usage::
-
-        client = Client(Config(
-            server_url="ws://localhost:8083",
-            token="bot-token",
-            strategy=MyStrategy(),
-        ))
-        client.run()   # blocks; auto-reconnects on disconnect
+    Lifecycle callbacks (on_match_start, on_death, on_win, on_match_end) are
+    called from the WebSocket thread and should be fast (logging / counters).
+    Move computation (on_move) runs in the strategy thread and may take up
+    to ~480 ms without triggering a disconnect.
     """
 
     def __init__(self, config: Config):
         self._config = config
         self._last_direction = Direction.RIGHT
         self._in_match = False
-        self._last_turn = 0
+        self._match_start_turn = 0
+        self._last_state: Optional[GameState] = None
         self._stop_event = threading.Event()
         self._version_mismatch = False
         self._ws: Optional[websocket.WebSocketApp] = None
         self._backoff = 5.0
         self._max_backoff = 60.0
 
-        # One-slot queue: only the *latest* game state matters.
-        # If the strategy thread is still computing, the stale state is replaced.
+        # One-slot queue for game_state messages only.
+        # The strategy thread always processes the freshest state.
         self._state_q: queue.Queue = queue.Queue(maxsize=1)
 
-        # Strategy runs in its own thread so the WebSocket loop is never blocked.
         self._strategy_thread = threading.Thread(
             target=self._strategy_loop,
             daemon=True,
@@ -101,11 +91,6 @@ class Client:
                 on_close=self._on_close,
             )
             self._ws = ws
-
-            # No ping_interval here: the *server* manages the ping/pong cycle.
-            # websocket-client automatically replies to server PING with PONG
-            # as long as the event loop is not blocked — which it won't be
-            # because strategy computation runs in a separate thread.
             ws.run_forever()
 
             if self._stop_event.is_set():
@@ -124,13 +109,12 @@ class Client:
             self._ws.close()
 
     # ------------------------------------------------------------------
-    # WebSocket callbacks (all lightweight — no blocking work here)
+    # WebSocket callbacks
     # ------------------------------------------------------------------
 
     def _on_open(self, ws) -> None:
-        self._backoff = 5.0  # reset on successful connect
+        self._backoff = 5.0
         self._version_mismatch = False
-        # Send version handshake immediately — server expects this as first message.
         ws.send(json.dumps({"type": "hello", "version": SDK_VERSION}))
         self._log(f"Connected — sent hello v{SDK_VERSION}")
 
@@ -141,7 +125,11 @@ class Client:
         self._log(f"WebSocket error: {error}")
 
     def _on_message(self, ws, raw: str) -> None:
-        """Parse the frame and hand off to the strategy thread immediately."""
+        """Dispatch incoming frames.
+
+        Lifecycle events (match_start, match_end) are handled immediately in
+        this thread. game_state messages are forwarded to the strategy thread.
+        """
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -161,13 +149,21 @@ class Client:
                 self.stop()
             return
 
+        if msg_type == "match_start":
+            self._handle_match_start(ws, data)
+            return
+
+        if msg_type == "match_end":
+            self._handle_match_end(data)
+            return
+
         if msg_type != "game_state" or not data.get("you"):
             return
 
         state = GameState.from_dict(data)
+        self._last_state = state
 
-        # Deliver the latest state.  If the strategy thread is busy, discard
-        # the stale state and replace it with the freshest one.
+        # Deliver the latest state to the strategy thread.
         try:
             self._state_q.put_nowait((ws, state))
         except queue.Full:
@@ -178,7 +174,49 @@ class Client:
             try:
                 self._state_q.put_nowait((ws, state))
             except queue.Full:
-                pass  # rare race; next message will succeed
+                pass
+
+    # ------------------------------------------------------------------
+    # Lifecycle handlers (called from WebSocket thread)
+    # ------------------------------------------------------------------
+
+    def _handle_match_start(self, ws, data: dict) -> None:
+        match_id = data.get("match_id", 0)
+        w = data.get("field_width", 0)
+        h = data.get("field_height", 0)
+        nb = len(data.get("bots", []))
+        self._log(f"Match {match_id} starting ({w}×{h}, {nb} bots)")
+        self._in_match = True
+        self._match_start_turn = 0
+        self._last_state = None
+
+    def _handle_match_end(self, data: dict) -> None:
+        match_id = data.get("match_id", 0)
+        won = data.get("won", False)
+        score = data.get("score", 0)
+        turns = data.get("turns", 0)
+        reason = data.get("reason", "")
+
+        result = MatchResult(
+            won=won,
+            score=score,
+            turns=turns,
+            state=self._last_state,
+        )
+
+        if won:
+            self._log(f"Match {match_id} WON — score {score} in {turns} turns")
+            if isinstance(self._config.strategy, MatchAware):
+                self._config.strategy.on_win(self._last_state)
+        else:
+            self._log(f"Match {match_id} LOST — score {score} in {turns} turns (reason: {reason})")
+            if isinstance(self._config.strategy, MatchAware):
+                self._config.strategy.on_death(self._last_state)
+
+        if isinstance(self._config.strategy, MatchAware):
+            self._config.strategy.on_match_end(result)
+
+        self._in_match = False
 
     # ------------------------------------------------------------------
     # Strategy thread
@@ -192,34 +230,27 @@ class Client:
             except queue.Empty:
                 continue
 
-            # Detect new match (turn resets to ≤1)
-            if state.turn <= 1 and (state.turn < self._last_turn or not self._in_match):
-                self._log("New match started!")
+            # Safety net: detect match start from game_state if match_start
+            # message was missed (e.g. older server, lost frame).
+            if not self._in_match or (state.turn <= 1 and state.turn < self._last_turn_seen()):
+                self._log("New match detected from game_state")
                 self._last_direction = Direction(state.you.direction)
                 self._in_match = True
+                self._match_start_turn = state.turn
+                if isinstance(self._config.strategy, MatchAware):
+                    self._config.strategy.on_match_start(state)
+            elif self._in_match and self._match_start_turn == 0:
+                # First game_state after a match_start message
+                self._match_start_turn = state.turn
+                self._last_direction = Direction(state.you.direction)
                 if isinstance(self._config.strategy, MatchAware):
                     self._config.strategy.on_match_start(state)
 
-            self._last_turn = state.turn
+            self._last_state_turn = state.turn
 
+            # If the bot is dead, wait for the match_end message
             if not state.you.alive:
-                if isinstance(self._config.strategy, MatchAware):
-                    self._config.strategy.on_death(state)
-                self._in_match = False
                 continue
-
-            # Detect win: bot alive and all opponents dead
-            if self._in_match and len(state.bots) > 1:
-                all_opponents_dead = all(
-                    not bot.alive
-                    for bot in state.bots
-                    if bot.bot_id != state.you.bot_id
-                )
-                if all_opponents_dead:
-                    if isinstance(self._config.strategy, MatchAware):
-                        self._config.strategy.on_win(state)
-                    self._in_match = False
-                    continue
 
             direction = self._config.strategy.move(state)
 
@@ -229,6 +260,9 @@ class Client:
                 self._last_direction = direction
             except Exception as exc:
                 self._log(f"Failed to send command: {exc}")
+
+    def _last_turn_seen(self) -> int:
+        return getattr(self, "_last_state_turn", 0)
 
     # ------------------------------------------------------------------
     # Internal

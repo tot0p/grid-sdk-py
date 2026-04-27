@@ -11,7 +11,7 @@ Quick start::
         return moves[0].direction if moves else Direction(state.you.direction)
 
     client = Client(Config(
-        server_url="ws://localhost:8083",
+        server_url="wss://game.learn2code.tech",
         token="your-bot-token",
         strategy=StrategyFunc(my_strategy),
     ))
@@ -21,19 +21,25 @@ Quick start::
 from .client import Client, Config
 from .direction import ALL_DIRECTIONS, Direction
 from .helpers import (
+    bot_by_id,
+    distance_to,
+    fill_ratio,
     find_closest_opponent,
     find_opponents,
     flood_fill,
+    grid_value,
     head_on_risk,
     is_safe,
+    is_trapped,
     manhattan_distance,
+    neighbors,
     safe_moves,
     safe_moves_detailed,
     voronoi_bfs,
     wall_count,
 )
 from .strategy import MatchAware, Strategy, StrategyFunc
-from .types import Bot, GameState, Move
+from .types import Bot, GameState, MatchResult, Move, Position
 
 __all__ = [
     # Client
@@ -42,7 +48,9 @@ __all__ = [
     # Types
     "Bot",
     "GameState",
+    "MatchResult",
     "Move",
+    "Position",
     # Direction
     "Direction",
     "ALL_DIRECTIONS",
@@ -50,15 +58,25 @@ __all__ = [
     "Strategy",
     "StrategyFunc",
     "MatchAware",
-    # Helpers
+    # Helpers — cell inspection
     "is_safe",
+    "grid_value",
+    "neighbors",
+    "wall_count",
+    "fill_ratio",
+    # Helpers — move generation
     "safe_moves",
     "safe_moves_detailed",
+    # Helpers — space analysis
     "flood_fill",
+    "is_trapped",
     "voronoi_bfs",
+    # Helpers — distance
     "manhattan_distance",
-    "wall_count",
+    "distance_to",
+    # Helpers — opponent analysis
     "head_on_risk",
     "find_opponents",
     "find_closest_opponent",
+    "bot_by_id",
 ]
