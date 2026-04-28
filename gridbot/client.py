@@ -12,7 +12,7 @@ from .types import GameState, MatchResult
 
 logger = logging.getLogger(__name__)
 
-SDK_VERSION = "0.3.2"
+SDK_VERSION = "0.3.4"
 
 
 class Config:
