@@ -5,7 +5,7 @@ Python SDK for [Grid](https://github.com/tot0p/grid) — a Tron-style competitiv
 ## Installation
 
 ```bash
-pip install grid-sdk-py
+pip install grid-sdk-py==0.3.4
 ```
 
 ## Quick start
@@ -66,23 +66,35 @@ This prevents disconnection when strategy computation takes longer than the serv
 ## Strategy interface
 
 ```python
-from gridbot import Strategy, MatchAware, GameState, Direction
+from gridbot import Strategy, MatchAware, GameState, Direction, MatchResult
 
 class MyBot(Strategy, MatchAware):
     def on_match_start(self, state: GameState) -> None:
-        ...  # called at the start of every match
+        ...  # called exactly once at the start of every match
 
     def on_death(self, state: GameState) -> None:
         ...  # called when your bot dies
+
+    def on_win(self, state: GameState) -> None:
+        ...  # called when all opponents are eliminated
+
+    def on_match_end(self, result: MatchResult) -> None:
+        ...  # called after on_death or on_win, every match
 
     def move(self, state: GameState) -> Direction:
         ...  # called every turn — must return within 500 ms
 ```
 
+`on_match_start` is guaranteed to fire exactly once per match — safe to use for per-match state initialization.
+
 ## Requirements
 
 - Python 3.10+
 - `websocket-client >= 1.7.0`
+
+## Other SDKs
+
+- **Go**: [`grid-sdk-go`](https://github.com/tot0p/grid-sdk-go) — `go get github.com/tot0p/grid-sdk-go@v0.3.0`
 
 ## License
 
