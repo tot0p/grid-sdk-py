@@ -55,6 +55,7 @@ class Client:
         self._last_direction = Direction.RIGHT
         self._in_match = False
         self._match_start_turn = 0
+        self._on_match_start_fired = False
         self._last_state: Optional[GameState] = None
         self._stop_event = threading.Event()
         self._version_mismatch = False
@@ -188,6 +189,7 @@ class Client:
         self._log(f"Match {match_id} starting ({w}×{h}, {nb} bots)")
         self._in_match = True
         self._match_start_turn = 0
+        self._on_match_start_fired = False
         self._last_state = None
 
     def _handle_match_end(self, data: dict) -> None:
@@ -217,6 +219,7 @@ class Client:
             self._config.strategy.on_match_end(result)
 
         self._in_match = False
+        self._on_match_start_fired = False
 
     # ------------------------------------------------------------------
     # Strategy thread
@@ -237,14 +240,18 @@ class Client:
                 self._last_direction = Direction(state.you.direction)
                 self._in_match = True
                 self._match_start_turn = state.turn
-                if isinstance(self._config.strategy, MatchAware):
-                    self._config.strategy.on_match_start(state)
+                if not self._on_match_start_fired:
+                    self._on_match_start_fired = True
+                    if isinstance(self._config.strategy, MatchAware):
+                        self._config.strategy.on_match_start(state)
             elif self._in_match and self._match_start_turn == 0:
                 # First game_state after a match_start message
                 self._match_start_turn = state.turn
                 self._last_direction = Direction(state.you.direction)
-                if isinstance(self._config.strategy, MatchAware):
-                    self._config.strategy.on_match_start(state)
+                if not self._on_match_start_fired:
+                    self._on_match_start_fired = True
+                    if isinstance(self._config.strategy, MatchAware):
+                        self._config.strategy.on_match_start(state)
 
             self._last_state_turn = state.turn
 
